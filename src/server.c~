@@ -1,0 +1,355 @@
+#include "stdhead.h"
+#include "server.h"
+#include "file_info.h"
+#include "peer_info.h"
+
+//#include "Gapil.h"
+
+int demonize  = 0;  /* daemon use option: default is not daemon */
+int debugging = 0;  /* debug info printing option: default is no debug */
+
+
+
+
+/* Program beginning */
+int main(int argc, char *argv[])
+{
+/* 
+ * Variables definition  
+ */
+    int listen_fd;
+    struct sockaddr_in serv_add;
+   
+    /*
+     * Input section: decode parameters passed in the calling 
+     * Use getopt function
+     */
+    int i;
+    opterr = 0;	 /* don't want writing to stderr */
+    while ( (i = getopt(argc, argv, "hdi")) != -1) {
+	switch (i) {
+	/* 
+	 * Handling options 
+	 */ 
+	case 'h':  
+	    printf("Wrong -h option use\n");
+	    usage();
+	    return(0);
+	    break;
+	case 'i':
+	    demonize = 0;
+	    break;
+	case 'd':
+	    debugging = 1;
+	    break;
+	case '?':   /* unrecognized options */
+	    printf("Unrecognized options -%c\n",optopt);
+	    usage();
+	default:    /* should not reached */
+	    usage();
+	}
+    }
+    /* ***********************************************************
+     * 
+     *		 Options processing completed
+     *
+     *		      Main code beginning
+     * 
+     * ***********************************************************/
+    /* install SIGCHLD handler */
+    // Signal(SIGCHLD, HandSigCHLD);  /* establish handler */
+    /* create socket */
+    if ( (listen_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {		/*UDP!!*/
+	perror("Socket creation error");
+	exit(1);
+    }
+    /* initialize address */
+    memset((void *)&serv_add, 0, sizeof(serv_add)); /* clear server address */
+    serv_add.sin_family = AF_INET;                  /* address type is INET */
+    serv_add.sin_port = htons(3333);                   /* echo port is 3333 */
+    serv_add.sin_addr.s_addr = htonl(INADDR_ANY);   /* connect from anywhere */
+    /* bind socket */
+    if (bind(listen_fd, (struct sockaddr *)&serv_add, sizeof(serv_add)) < 0) {
+	perror("bind error");
+	exit(1);
+    }
+    /* release privileges and go daemon */
+    if (setgid(65534) !=0) { /* first give away group privileges */
+	perror("cannot give away group privileges");
+	exit(1);
+    }
+    if (setuid(65534) !=0) { /* and only after user ... */
+	perror("cannot give away user privileges");
+	exit(1);
+    }
+    
+    start_server(listen_fd,&serv_add, (socklen_t *) sizeof(serv_add));
+    
+
+    /* normal exit, never reached */
+    return 0;
+}
+    
+    
+    
+/*
+ * routine to print usage info and exit
+ */
+void usage(void) {
+    printf("Elementary echo server\n");
+    printf("Usage:\n");
+    printf("  echod [-h] \n");
+    printf("  -h	   print this help\n");
+    printf("  -d	   print debug info\n");
+    printf("  -i	   use interactively\n");
+    exit(1);
+}
+
+ssize_t FullWrite(int fd, const void *buf, size_t count) 
+{
+    size_t nleft;
+    ssize_t nwritten;
+
+    nleft = count;
+    while (nleft > 0) {             /* repeat until no left */
+	if ( (nwritten = write(fd, buf, nleft)) < 0) {
+	    if (errno == EINTR) {   /* if interrupted by system call */
+		continue;           /* repeat the loop */
+	    } else {
+		return(nwritten);   /* otherwise exit with error */
+	    }
+	}
+	nleft -= nwritten;          /* set left to write */
+	buf +=nwritten;             /* set pointer */
+    }
+    return (nleft);
+}
+
+void start_server(int sockfd, struct sockaddr_in * src_addr, socklen_t *addrlen ){
+	int nread,nwrite,i,n;
+	char rd_buffer[MAXLINE+1],wr_buffer[MAXLINE+1],address[16]="";
+	while (1){
+		inet_ntop(AF_INET,&src_addr->sin_addr, address, sizeof(address));
+		nread = recvfrom(sockfd, rd_buffer, MAXLINE,0,(struct sockaddr *)&src_addr,&addrlen);
+		//printf("Received «%s» command from host:%s...\n",rd_buffer,address);
+		if ((n=parse_comm(rd_buffer))<0){
+			printf("Unknown command received...\n");
+			continue;
+		}
+		strcpy(wr_buffer,"ACK:");
+		strcat(wr_buffer,rd_buffer);
+		printf("Sending %s\n",wr_buffer);
+		nwrite=sendto(sockfd, wr_buffer, MAXLINE,0,src_addr,addrlen);
+		if (n==3)
+			sendlist(sockfd,src_addr,addrlen);
+		
+		
+	}
+}
+
+int parse_comm(char * buff){
+	int n;
+	if (strncmp(buff, &join_s,4)==0)
+		n=joinf(buff);
+	else if (strncmp(buff, list_s,4)==0)
+		n=listf(buff);
+	else if (strncmp(buff,update_s,6)==0)
+		n=updatef(buff);
+//	else if (strncmp(buff,leave_s,5)==0)
+//		n=leavef(buff);
+//	else if (strncmp(buff,whohas_s,6)==0)
+//		n=whohasf(buff);
+	else n=-1;
+	return n;
+	
+}
+
+int joinf(char *buff){
+	char addr[16]="";
+	int n;
+	n=read_add(addr,buff);
+	if (n<0)
+		return n;
+	if (is_there_addr(addr)) return 2; /* The function returns 1 if the address is already existing in the peers table*/
+	//sei la mia vita felice!
+	if (push_peer(addr)<0) return -1;
+	return 1; /*The function returns 2 if the address has been succesfully added to the net*/
+	
+}
+
+int listf(char *buff){
+	char add[16]="";
+	int n;
+	n=read_add(add,buff);
+	if (n<0)
+		return n;
+	if (is_there_addr(add)) 
+		return 3;			/*the function returns 3 if the server must send the file list to the peer*/
+	return -1;
+	
+}
+
+/*Update command: "update <owner_address> <filename> <md5>" */
+
+int updatef(char * buff){
+	char add[16]="",md5[33]="",filename[70]="" ;
+	int n;
+	n=parse_arg(add,buff,1);
+	if (n<0)
+		return n;
+	if (is_there_addr(add)) {
+		parse_arg(filename,buff,2);
+		parse_arg(md5,buff,3);
+		n=add_file(filename,md5,add);
+	}
+	if (n<0)return n;
+	return 0;
+}
+
+int push_peer(char * add){
+	int i;
+	for (i=0; i<1000; ++i){
+			if (peer_table[i].addr[0]==NULL) 
+				strcpy(peer_table[i].addr,add);
+				printf("%s peer joined the net...\n");
+				return 0;
+		}
+	printf ("Peer table full, can't add ip:%s to the net...\n", add);
+	return -1;
+}
+
+int read_add(char *dest_buff,char *src_buff){
+	int i,n=0;
+	printf("%d\n",(int)strlen(src_buff));
+	for (i=0; i<strlen(src_buff);++i){
+		
+		if (src_buff[i]==' '){ 
+			n=i+1;
+			continue;
+		}
+		dest_buff[i-n]=src_buff[i];
+	}
+	if (n==0) 
+		return -1;
+	dest_buff[i]='\0';
+	return 0;	
+}
+
+int parse_arg(char * dest_buff, char * src_buff, int arg_num){
+	int i,j,n=0;
+	for (i=0;i<strlen(src_buff);++i){
+		if (n==arg_num) break;
+		if (src_buff[i]==' ') ++n;
+	}
+	n=1;
+	printf("%d\n",i);
+	j=0;
+	while(n){
+		if (src_buff[i]!=' ' && i<strlen(src_buff) ){
+			dest_buff[j]=src_buff[i];
+			++i;
+			++j;
+		}
+		else {
+			dest_buff[j]='\0';
+			n=0;
+		}
+	}
+	return 0;
+}
+
+/* The add_file() function returns:
+	o 1 if the couple <filename,md5> is not already in the filetable and
+	  a new item is pushed;
+	o 2 if <filename,md5> is already in the table, but the owner is not in the list of file_owners
+	o 3 if the owner is already registered in the file_owners list.
+	o -1 if there is no more space in the file_table
+*/
+
+
+//int add_file(char * filename, char * md5, char * owner_add){
+//	int i,j;
+//	for (i=0; i<1000; ++i){
+//		if ((strcmp((file_table[i].name),filename))==0 && (strcmp((file_table[i].md5sum),md5))==0){ 
+//			for(j=0; j<20;++j){
+//				if((strcmp((file_table[i].owners_add[j]),owner_add))==0) {
+////					printf(	"%s==%s\n",file_table[i].owners_add[j], owner_add);		
+//					return 3;
+//				}
+//			}
+//			strcpy(file_table[i].owners_add[file_table[i].cursor],owner_add);
+//			file_table[i].cursor = (file_table[i].cursor+1)%20;
+//			return 2;			
+//		}
+//		
+//	}
+//	
+//	for (i=0; i<1000;++i){
+//		if (file_table[i].name[0]==NULL){
+//			file_table[i].id=id;
+//			++id;
+//			strcpy(file_table[i].name,filename);
+//			strcpy(file_table[i].md5sum,md5);
+//			strcpy(file_table[i].owners_add[0],owner_add);
+//			file_table[i].cursor=1;
+//			return 1;
+//		}
+//	}
+//	return -1;
+//}
+
+//int is_there_file(char * filename, int * index_list, int list_size){
+//	int i,cursor=0;
+//	printf("list dimension:%d\n",list_size);
+//	for (i=0; i<1000; ++i){
+//		if ((strcmp((file_table[i].name),filename))==0){ 
+//			index_list[cursor]=i;
+//			++cursor;
+//		}
+//		if (cursor>=list_size) return 2;
+//	}
+//	if (cursor>0)return 1;
+//	return 0;
+//}
+
+
+
+
+int is_there_addr(char * address){
+	int i;
+	for (i=0; i<1000; ++i){
+		if (peer_table[i].addr[0]!=NULL && (strcmp((peer_table[i].addr),address))==0) return 1;
+	}
+	return 0;
+}
+
+int sendlist(int sockfd, struct sockaddr * dest_addr, socklen_t addr_len){
+	int i,nwrite;
+	char buff[100]="";
+	for(i=0; i<1000;++i){
+		if (file_table[i].name[0]==NULL)continue;
+		strcpy(buff,file_table[i].id);
+		strcat(buff," ");
+		strcat(buff,file_table[i].name);
+		strcat(buff," ");
+		strcat(buff,file_table[i].md5sum);
+		nwrite=sendto(sockfd,buff, strlen(buff),0,dest_addr,addr_len);
+		if (nwrite!=strlen(buff)) printf("Errore in sendlist...\n");
+	}
+	return 0;
+}
+
+
+
+
+/*
+ * routine to print error on stout or syslog
+ */
+void PrintErr(char * error) {
+    if (demonize) {                       /* daemon mode */
+	syslog(LOG_ERR, "%s: %m", error); /* log string and error message */
+    } else {
+	perror(error);
+    }
+    return;
+}
